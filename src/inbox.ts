@@ -6,6 +6,10 @@ export function marker(mainId: string): string {
   return `[recommend-for:${mainId}]`;
 }
 
+export function parseMarker(description: string): string | undefined {
+  return description.match(/\[recommend-for:([A-Za-z0-9]+)\]/)?.[1];
+}
+
 export function inboxName(mainName: string): string {
   return `${mainName} のおすすめ`;
 }

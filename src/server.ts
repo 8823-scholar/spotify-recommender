@@ -1,8 +1,12 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
-import { ensureInbox, lookupInbox } from './inbox.js';
+import { moveToMain, rejectRecommendations } from './actions.js';
+import { reviewPort } from './config.js';
+import { ensureInbox, lookupInbox, parseMarker } from './inbox.js';
 import { dedupe, pickBest } from './match.js';
+import { loadRejected } from './rejected.js';
+import { openInBrowser, startReviewServer, type ReviewServer } from './review.js';
 import {
   addItems,
   getPlaylist,
@@ -10,7 +14,6 @@ import {
   myPlaylists,
   parsePlaylistId,
   playlistTracks,
-  removeItems,
   searchTracks,
   type Track,
 } from './spotify.js';
@@ -56,6 +59,14 @@ const playlistArg = z
   .string()
   .describe('メインのプレイリスト。ID・spotify:playlist:... URI・open.spotify.com の URL のいずれか');
 
+const urisArg = z
+  .array(z.string().regex(/^spotify:track:[A-Za-z0-9]+$/))
+  .min(1)
+  .max(100);
+
+// 整理画面のサーバーは MCP サーバーのプロセス内で1つだけ起動し、使い回す
+let review: Promise<ReviewServer> | undefined;
+
 function createServer(): McpServer {
   const server = new McpServer({ name: 'spotify-recommender', version: '0.1.0' });
 
@@ -70,8 +81,9 @@ function createServer(): McpServer {
       const playlists = await myPlaylists();
       return playlists
         .map((p) => {
-          const tag = p.description.match(/\[recommend-for:[A-Za-z0-9]+\]/)?.[0];
-          return `${p.id} | ${p.name} | ${p.total}曲 | owner: ${p.owner}${tag ? ` | ${tag}` : ''}`;
+          const mainId = parseMarker(p.description);
+          const tag = mainId ? ` | [recommend-for:${mainId}]` : '';
+          return `${p.id} | ${p.name} | ${p.total}曲 | owner: ${p.owner}${tag}`;
         })
         .join('\n');
     }),
@@ -128,30 +140,28 @@ function createServer(): McpServer {
     'add_recommendations',
     {
       description:
-        'おすすめ曲をメインのプレイリストに対応するおすすめ用プレイリストへ追加する。おすすめ用プレイリストが無ければ「<メイン名> のおすすめ」(非公開) を作成する。メインまたはおすすめ用に既にある曲 (同じ曲の別音源を含む) は追加しない',
+        'おすすめ曲をメインのプレイリストに対応するおすすめ用プレイリストへ追加する。おすすめ用プレイリストが無ければ「<メイン名> のおすすめ」(非公開) を作成する。メイン・おすすめ用に既にある曲と、過去に却下された曲 (いずれも同じ曲の別音源を含む) は追加しない',
       inputSchema: z.object({
         playlist: playlistArg,
-        uris: z
-          .array(z.string().regex(/^spotify:track:[A-Za-z0-9]+$/))
-          .min(1)
-          .max(100)
-          .describe('search_tracks で得た spotify:track:... URI'),
+        uris: urisArg.describe('search_tracks で得た spotify:track:... URI'),
       }),
     },
     handle(async ({ playlist, uris }) => {
       const { inbox, main, created } = await ensureInbox(parsePlaylistId(playlist));
-      const [candidates, mainTracks, inboxTracks] = await Promise.all([
+      const [candidates, mainTracks, inboxTracks, rejected] = await Promise.all([
         mapLimit([...new Set(uris)], CONCURRENCY, getTrack),
         playlistTracks(main.id),
         created ? Promise.resolve([]) : playlistTracks(inbox.id),
+        loadRejected(),
       ]);
 
       const vsMain = dedupe(candidates, mainTracks);
       const vsInbox = dedupe(vsMain.fresh, inboxTracks);
-      if (vsInbox.fresh.length > 0) {
+      const vsRejected = dedupe(vsInbox.fresh, rejected);
+      if (vsRejected.fresh.length > 0) {
         await addItems(
           inbox.id,
-          vsInbox.fresh.map((t) => t.uri),
+          vsRejected.fresh.map((t) => t.uri),
         );
       }
 
@@ -159,11 +169,26 @@ function createServer(): McpServer {
         `おすすめ用プレイリスト: ${inbox.name} (${inbox.id})${created ? ' ※新規作成' : ''}`,
         `https://open.spotify.com/playlist/${inbox.id}`,
         '',
-        `追加 ${vsInbox.fresh.length}曲:`,
-        ...vsInbox.fresh.map(line),
+        `追加 ${vsRejected.fresh.length}曲:`,
+        ...vsRejected.fresh.map(line),
         ...(vsMain.duplicates.length ? ['', 'メインに既にあるため除外:', ...vsMain.duplicates.map(line)] : []),
         ...(vsInbox.duplicates.length ? ['', 'おすすめ済みのため除外:', ...vsInbox.duplicates.map(line)] : []),
+        ...(vsRejected.duplicates.length ? ['', '却下済みのため除外:', ...vsRejected.duplicates.map(line)] : []),
       ].join('\n');
+    }),
+  );
+
+  server.registerTool(
+    'list_rejected',
+    {
+      description:
+        '過去に却下された曲の一覧を返す。推薦候補を考えるときに、ユーザーが好まない・既に知っている傾向の参考にする',
+      inputSchema: z.object({}),
+    },
+    handle(async () => {
+      const rejected = await loadRejected();
+      if (rejected.length === 0) return '却下された曲はまだありません';
+      return [`# 却下済み (${rejected.length}曲)`, ...rejected.map(line)].join('\n');
     }),
   );
 
@@ -186,47 +211,51 @@ function createServer(): McpServer {
     {
       description:
         'おすすめ用プレイリストの曲をメインのプレイリストへ移す (メインの末尾に追加し、おすすめ用から削除する)。おすすめ用に無い URI は無視する',
-      inputSchema: z.object({
-        playlist: playlistArg,
-        uris: z
-          .array(z.string().regex(/^spotify:track:[A-Za-z0-9]+$/))
-          .min(1)
-          .max(100),
-      }),
+      inputSchema: z.object({ playlist: playlistArg, uris: urisArg }),
     },
     handle(async ({ playlist, uris }) => {
-      const mainId = parsePlaylistId(playlist);
-      const inbox = await lookupInbox(mainId);
-      if (!inbox) throw new Error('おすすめ用プレイリストが見つかりません');
-
-      const [inboxTracks, mainTracks] = await Promise.all([playlistTracks(inbox.id), playlistTracks(mainId)]);
-      const requested = new Set(uris);
-      const targets = inboxTracks.filter((t) => requested.has(t.uri));
-      const missing = [...requested].filter((u) => !targets.some((t) => t.uri === u));
-      const { fresh } = dedupe(targets, mainTracks);
-
-      // 先にメインへ追加してから削除し、途中で失敗しても曲が消えないようにする
-      if (fresh.length > 0) {
-        await addItems(
-          mainId,
-          fresh.map((t) => t.uri),
-        );
-      }
-      if (targets.length > 0) {
-        await removeItems(
-          inbox.id,
-          targets.map((t) => t.uri),
-        );
-      }
-
+      const { moved, removedOnly, missing } = await moveToMain(parsePlaylistId(playlist), uris);
       return [
-        `メインへ移動 ${fresh.length}曲:`,
-        ...fresh.map(line),
-        ...(targets.length > fresh.length
-          ? ['', `メインに既にあったため削除のみ ${targets.length - fresh.length}曲`]
-          : []),
+        `メインへ移動 ${moved.length}曲:`,
+        ...moved.map(line),
+        ...(removedOnly.length ? ['', `メインに既にあったため削除のみ ${removedOnly.length}曲`] : []),
         ...(missing.length ? ['', 'おすすめ用に無いため無視:', ...missing] : []),
       ].join('\n');
+    }),
+  );
+
+  server.registerTool(
+    'reject_recommendations',
+    {
+      description:
+        'おすすめ用プレイリストの曲を却下する (おすすめ用から削除し、却下済みとして記録する)。却下済みの曲は以後 add_recommendations で追加されない',
+      inputSchema: z.object({ playlist: playlistArg, uris: urisArg }),
+    },
+    handle(async ({ playlist, uris }) => {
+      const { rejected, missing } = await rejectRecommendations(parsePlaylistId(playlist), uris);
+      return [
+        `却下 ${rejected.length}曲:`,
+        ...rejected.map(line),
+        ...(missing.length ? ['', 'おすすめ用に無いため無視:', ...missing] : []),
+      ].join('\n');
+    }),
+  );
+
+  server.registerTool(
+    'open_review',
+    {
+      description:
+        'おすすめ用プレイリストの曲を試聴しながら「メインへ移す」「却下」を選べる整理画面をブラウザで開き、その URL を返す',
+      inputSchema: z.object({}),
+    },
+    handle(async () => {
+      review ??= startReviewServer(reviewPort());
+      const { url } = await review.catch((e) => {
+        review = undefined;
+        throw e;
+      });
+      openInBrowser(url);
+      return `整理画面を開きました: ${url}`;
     }),
   );
 

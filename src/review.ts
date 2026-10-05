@@ -1,0 +1,127 @@
+import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { listInboxes, moveToMain, rejectRecommendations } from './actions.js';
+import { reviewPage } from './review-page.js';
+
+const TRACK_URI = /^spotify:track:[A-Za-z0-9]+$/;
+const PLAYLIST_ID = /^[A-Za-z0-9]+$/;
+const MAX_BODY = 10_000;
+
+export type ReviewServer = { url: string; close: () => Promise<void> };
+
+const PAGE_CSP =
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src https://open.spotify.com";
+
+function send(res: ServerResponse, status: number, body: unknown, type = 'application/json; charset=utf-8') {
+  res.writeHead(status, {
+    'Content-Type': type,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    ...(type.startsWith('text/html') ? { 'Content-Security-Policy': PAGE_CSP } : {}),
+  });
+  res.end(typeof body === 'string' ? body : JSON.stringify(body));
+}
+
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  let raw = '';
+  for await (const chunk of req) {
+    raw += chunk;
+    if (raw.length > MAX_BODY) throw new Error('リクエストが大きすぎます');
+  }
+  return JSON.parse(raw);
+}
+
+function parseAction(body: unknown): { main: string; uri: string } {
+  const { main, uri } = (body ?? {}) as Record<string, unknown>;
+  if (typeof main !== 'string' || !PLAYLIST_ID.test(main) || typeof uri !== 'string' || !TRACK_URI.test(uri)) {
+    throw new Error('main と uri の形式が不正です');
+  }
+  return { main, uri };
+}
+
+export function startReviewServer(port: number): Promise<ReviewServer> {
+  // 別サイトからこのローカルサーバーを操作されないよう、起動ごとのトークンと Host を検証する
+  const token = randomBytes(24).toString('base64url');
+  let host = '';
+
+  const server: Server = createServer(async (req, res) => {
+    if (req.headers.host !== host) {
+      send(res, 403, { error: 'forbidden' });
+      return;
+    }
+    const url = new URL(req.url ?? '/', `http://${host}`);
+    try {
+      if (req.method === 'GET' && url.pathname === '/') {
+        if (url.searchParams.get('t') !== token) {
+          send(
+            res,
+            403,
+            'URL が無効です。Claude Code か npm run review から開き直してください',
+            'text/plain; charset=utf-8',
+          );
+          return;
+        }
+        send(res, 200, reviewPage, 'text/html; charset=utf-8');
+        return;
+      }
+      if (!url.pathname.startsWith('/api/')) {
+        send(res, 404, { error: 'not found' });
+        return;
+      }
+      if (req.headers['x-review-token'] !== token) {
+        send(res, 403, { error: 'forbidden' });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/inboxes') {
+        send(res, 200, await listInboxes());
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/move') {
+        const { main, uri } = parseAction(await readJson(req));
+        send(res, 200, await moveToMain(main, [uri]));
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/reject') {
+        const { main, uri } = parseAction(await readJson(req));
+        send(res, 200, await rejectRecommendations(main, [uri]));
+        return;
+      }
+      send(res, 404, { error: 'not found' });
+    } catch (e) {
+      send(res, 500, { error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  const listen = (p: number) =>
+    new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(p, '127.0.0.1', () => {
+        server.off('error', reject);
+        resolve();
+      });
+    });
+
+  return (async () => {
+    try {
+      await listen(port);
+    } catch (e) {
+      // 既定ポートが使用中なら空きポートで起動する
+      if ((e as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw e;
+      await listen(0);
+    }
+    const actual = (server.address() as AddressInfo).port;
+    host = `127.0.0.1:${actual}`;
+    return {
+      url: `http://${host}/?t=${token}`,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+  })();
+}
+
+export function openInBrowser(url: string): void {
+  if (process.platform === 'darwin') {
+    execFile('open', [url]);
+  }
+}

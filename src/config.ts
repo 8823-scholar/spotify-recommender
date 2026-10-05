@@ -23,7 +23,21 @@ export function redirectUri(): string {
   return process.env.SPOTIFY_REDIRECT_URI ?? DEFAULT_REDIRECT_URI;
 }
 
-export function tokenPath(): string {
+export const DEFAULT_REVIEW_PORT = 8889;
+
+export function reviewPort(): number {
+  return Number(process.env.SPOTIFY_REVIEW_PORT ?? DEFAULT_REVIEW_PORT);
+}
+
+function configDir(): string {
   const base = process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config');
-  return join(base, 'spotify-recommender', 'token.json');
+  return join(base, 'spotify-recommender');
+}
+
+export function tokenPath(): string {
+  return join(configDir(), 'token.json');
+}
+
+export function rejectedPath(): string {
+  return join(configDir(), 'rejected.json');
 }
