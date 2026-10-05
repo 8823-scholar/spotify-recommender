@@ -163,11 +163,12 @@ export async function playlistTracks(id: string): Promise<Track[]> {
 
 export async function getTrack(uri: string): Promise<Track> {
   const id = uri.replace(/^spotify:track:/, '');
-  return toTrack(await api<RawTrack>('GET', `/tracks/${encodeURIComponent(id)}?market=from_token`));
+  return toTrack(await api<RawTrack>('GET', `/tracks/${encodeURIComponent(id)}`));
 }
 
+// market=from_token は user-read-private スコープが無いと Search で 403 になるため付けない
 export async function searchTracks(query: string, limit: number): Promise<Track[]> {
-  const params = new URLSearchParams({ q: query, type: 'track', limit: String(limit), market: 'from_token' });
+  const params = new URLSearchParams({ q: query, type: 'track', limit: String(limit) });
   const res = await api<{ tracks: { items: (RawTrack | null)[] } }>('GET', `/search?${params}`);
   return res.tracks.items.filter((t): t is RawTrack => !!t).map(toTrack);
 }
