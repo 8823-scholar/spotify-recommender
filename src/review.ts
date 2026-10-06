@@ -3,10 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { listInboxes, moveToMain, rejectRecommendations } from './actions.js';
-import { PLAYBACK_SCOPES } from './config.js';
+import { LIBRARY_SCOPES, PLAYBACK_SCOPES } from './config.js';
 import { jobStatus, startRegenerate } from './regenerate.js';
 import { reviewPage } from './review-page.js';
-import { getPlaylist, playPlaylist } from './spotify.js';
+import { getPlaylist, libraryContains, playPlaylist, setLiked } from './spotify.js';
 import { accessToken, missingScopes } from './token.js';
 
 const TRACK_URI = /^spotify:track:[A-Za-z0-9]+$/;
@@ -114,6 +114,30 @@ export function startReviewServer(port: number): Promise<ReviewServer> {
           return;
         }
         send(res, 200, { token: await accessToken() });
+        return;
+      }
+      if (url.pathname === '/api/liked' || url.pathname === '/api/like') {
+        if ((await missingScopes(LIBRARY_SCOPES)).length > 0) {
+          send(res, 409, {
+            error: 'お気に入り登録には再認証が必要です。ターミナルで npm run auth を実行してから再読み込みしてください',
+          });
+          return;
+        }
+      }
+      if (req.method === 'GET' && url.pathname === '/api/liked') {
+        const uris = (url.searchParams.get('uris') ?? '').split(',').filter(Boolean);
+        if (uris.length > 200 || !uris.every((u) => TRACK_URI.test(u))) throw new Error('uris の形式が不正です');
+        const flags = uris.length ? await libraryContains(uris) : [];
+        send(res, 200, Object.fromEntries(uris.map((u, i) => [u, flags[i] === true])));
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/like') {
+        const { uri, liked } = (await readJson(req)) as Record<string, unknown>;
+        if (typeof uri !== 'string' || !TRACK_URI.test(uri) || typeof liked !== 'boolean') {
+          throw new Error('uri と liked の形式が不正です');
+        }
+        await setLiked(uri, liked);
+        send(res, 200, { uri, liked });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/api/play') {

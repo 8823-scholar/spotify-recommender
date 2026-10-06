@@ -182,6 +182,21 @@ export async function playPlaylist(deviceId: string, playlistId: string, uri?: s
   });
 }
 
+// ライブラリ API が1リクエストで受け付ける URI の上限
+const LIBRARY_CHUNK = 40;
+
+export async function libraryContains(uris: string[]): Promise<boolean[]> {
+  const results: boolean[] = [];
+  for (const part of chunk(uris, LIBRARY_CHUNK)) {
+    results.push(...(await api<boolean[]>('GET', `/me/library/contains?uris=${encodeURIComponent(part.join(','))}`)));
+  }
+  return results;
+}
+
+export async function setLiked(uri: string, liked: boolean): Promise<void> {
+  await api(liked ? 'PUT' : 'DELETE', `/me/library?uris=${encodeURIComponent(uri)}`);
+}
+
 export async function createPlaylist(name: string, description: string): Promise<Playlist> {
   return toPlaylist(await api<RawPlaylist>('POST', '/me/playlists', { name, description, public: false }));
 }

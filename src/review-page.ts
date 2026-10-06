@@ -67,6 +67,9 @@ export const reviewPage = `<!doctype html>
   body.sdk .play { display: inline-block; }
   body.sdk .card iframe { display: none; }
   .card.playing { border-color: var(--accent); }
+  .like { color: var(--muted); min-width: 40px; }
+  .like.on { color: #e0245e; border-color: #e0245e; }
+  body.no-like .like { display: none; }
   #notice { font-size: 13px; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin-bottom: 16px; }
   #player { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line); padding: 10px 16px; display: none; }
   #player.show { display: block; }
@@ -95,6 +98,7 @@ export const reviewPage = `<!doctype html>
     <button id="prev" aria-label="前の曲">⏮</button>
     <button id="toggle">一時停止</button>
     <button id="next" aria-label="次の曲">⏭</button>
+    <button id="like-now" class="like" data-like="" aria-label="お気に入り">♡</button>
     <div class="now">
       <div class="title" id="now-title"></div>
       <input type="range" id="seek" min="0" max="0" value="0" aria-label="再生位置">
@@ -146,6 +150,7 @@ export const reviewPage = `<!doctype html>
     const id = track.uri.split(':').pop();
     const album = track.year ? track.album + ' (' + track.year + ')' : track.album;
     const play = el('button', { class: 'play', text: '▶ 再生' });
+    const like = el('button', { class: 'like', 'data-like': track.uri, 'aria-label': 'お気に入り', text: '♡' });
     const move = el('button', { class: 'move', text: 'メインへ移す' });
     const reject = el('button', { class: 'reject', text: '却下' });
     const error = el('div', { class: 'error', hidden: '' });
@@ -161,7 +166,7 @@ export const reviewPage = `<!doctype html>
           el('div', { class: 'title', text: track.name + ' — ' + track.artists.join(', ') }),
           el('div', { class: 'sub', text: album }),
         ]),
-        el('div', { class: 'actions' }, [play, move, reject]),
+        el('div', { class: 'actions' }, [play, like, move, reject]),
       ]),
       error,
     ]);
@@ -313,7 +318,9 @@ export const reviewPage = `<!doctype html>
   async function load() {
     root.replaceChildren(el('p', { class: 'status', text: '読み込み中…' }));
     try {
-      render(await api('GET', '/api/inboxes'));
+      const groups = await api('GET', '/api/inboxes');
+      render(groups);
+      await refreshLikes(groups.flatMap((g) => g.tracks.map((t) => t.uri)));
     } catch (e) {
       root.replaceChildren(el('p', { class: 'error', text: '読み込みに失敗しました: ' + e.message }));
     }
@@ -327,19 +334,70 @@ export const reviewPage = `<!doctype html>
   const seek = document.getElementById('seek');
   const time = document.getElementById('time');
   const toggle = document.getElementById('toggle');
+  const likeNow = document.getElementById('like-now');
   let player;
   let deviceId;
   let seeking = false;
 
-  function showNotice(message) {
-    notice.textContent = message;
-    notice.hidden = false;
+  // 再生とお気に入りの案内を別々に出し分けられるよう、種類ごとに保持する
+  const notices = new Map();
+
+  function setNotice(key, message) {
+    if (message) notices.set(key, message);
+    else notices.delete(key);
+    notice.replaceChildren(...[...notices.values()].map((m) => el('div', { text: m })));
+    notice.hidden = notices.size === 0;
   }
 
   function fallbackToEmbed(message) {
     document.body.classList.remove('sdk');
-    showNotice(message + ' 埋め込みプレーヤー (プレビュー再生) を表示しています。');
+    setNotice('player', message + ' 埋め込みプレーヤー (プレビュー再生) を表示しています。');
   }
+
+  // Spotify の「お気に入りの曲」に入っているかを URI ごとに保持し、カードと再生バーの ♡ に反映する
+  const liked = {};
+
+  function paintLikes() {
+    for (const b of document.querySelectorAll('[data-like]')) {
+      const on = liked[b.dataset.like] === true;
+      b.classList.toggle('on', on);
+      b.textContent = on ? '♥' : '♡';
+      b.title = on ? 'お気に入りから外す' : 'お気に入りに登録';
+    }
+  }
+
+  async function refreshLikes(uris) {
+    const unknown = uris.filter((u) => !(u in liked));
+    if (unknown.length === 0) return paintLikes();
+    try {
+      Object.assign(liked, await api('GET', '/api/liked?uris=' + encodeURIComponent(unknown.join(','))));
+      document.body.classList.remove('no-like');
+      setNotice('like', null);
+    } catch (e) {
+      document.body.classList.add('no-like');
+      setNotice('like', e.message + '。');
+    }
+    paintLikes();
+  }
+
+  async function toggleLike(uri) {
+    const next = !liked[uri];
+    liked[uri] = next;
+    paintLikes();
+    try {
+      await api('POST', '/api/like', { uri, liked: next });
+      showToast(next ? 'お気に入りに登録しました' : 'お気に入りから外しました');
+    } catch (e) {
+      liked[uri] = !next;
+      paintLikes();
+      showToast('お気に入りの変更に失敗しました: ' + e.message);
+    }
+  }
+
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-like]');
+    if (b && b.dataset.like) toggleLike(b.dataset.like);
+  });
 
   function fmt(ms) {
     const s = Math.floor(ms / 1000);
@@ -370,6 +428,10 @@ export const reviewPage = `<!doctype html>
     time.textContent = fmt(state.position) + ' / ' + fmt(state.duration);
     for (const card of document.querySelectorAll('.card')) {
       card.classList.toggle('playing', card.dataset.uri === t.uri);
+    }
+    if (likeNow.dataset.like !== t.uri) {
+      likeNow.dataset.like = t.uri;
+      refreshLikes([t.uri]);
     }
   }
 
@@ -404,7 +466,7 @@ export const reviewPage = `<!doctype html>
       player.addListener('ready', ({ device_id }) => {
         deviceId = device_id;
         document.body.classList.add('sdk');
-        notice.hidden = true;
+        setNotice('player', null);
       });
       player.addListener('not_ready', () => {
         deviceId = undefined;

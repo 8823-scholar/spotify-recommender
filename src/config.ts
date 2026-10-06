@@ -4,12 +4,16 @@ import { join } from 'node:path';
 // 整理画面で全曲を再生するための権限 (Web Playback SDK と再生開始 API)
 export const PLAYBACK_SCOPES = ['streaming', 'user-read-email', 'user-read-private', 'user-modify-playback-state'];
 
+// 整理画面から曲を Spotify の「お気に入りの曲」に登録・解除するための権限
+export const LIBRARY_SCOPES = ['user-library-read', 'user-library-modify'];
+
 export const SCOPES = [
   'playlist-read-private',
   'playlist-read-collaborative',
   'playlist-modify-private',
   'playlist-modify-public',
   ...PLAYBACK_SCOPES,
+  ...LIBRARY_SCOPES,
 ];
 
 // Spotify は redirect URI に localhost を受け付けないため loopback IP を使う
