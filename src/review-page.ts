@@ -92,7 +92,9 @@ export const reviewPage = `<!doctype html>
 </main>
 <div id="player">
   <div class="inner">
+    <button id="prev" aria-label="前の曲">⏮</button>
     <button id="toggle">一時停止</button>
+    <button id="next" aria-label="次の曲">⏭</button>
     <div class="now">
       <div class="title" id="now-title"></div>
       <input type="range" id="seek" min="0" max="0" value="0" aria-label="再生位置">
@@ -167,7 +169,7 @@ export const reviewPage = `<!doctype html>
     play.addEventListener('click', async () => {
       error.hidden = true;
       try {
-        await playTrack(track.uri);
+        await playTrack(group, track.uri);
       } catch (e) {
         error.textContent = '再生できませんでした: ' + e.message;
         error.hidden = false;
@@ -178,6 +180,8 @@ export const reviewPage = `<!doctype html>
       move.disabled = reject.disabled = true;
       error.hidden = true;
       try {
+        // 聴いている曲を却下したら、聴き続ける理由はないので次の曲へ進める
+        if (kind === 'reject' && card.classList.contains('playing') && player) player.nextTrack();
         await api('POST', '/api/' + kind, { main: group.main.id, uri: track.uri });
         showToast((kind === 'move' ? group.main.name + ' へ移しました: ' : '却下しました: ') + track.name);
         card.classList.add('leaving');
@@ -278,6 +282,8 @@ export const reviewPage = `<!doctype html>
       const section = el('section');
       const panel = el('div', { class: 'panel', hidden: '', 'data-panel': group.main.id });
       const button = regenButton(group, section, panel);
+      const playAll = el('button', { class: 'play regen', text: '▶ 順に再生' });
+      playAll.addEventListener('click', () => playTrack(group).catch((e) => showToast('再生できませんでした: ' + e.message)));
       section.append(
         el('div', { class: 'group-head' }, [
           el('h2', { text: group.inbox.name }),
@@ -285,7 +291,7 @@ export const reviewPage = `<!doctype html>
         ]),
         el('div', { class: 'row' }, [
           el('p', { class: 'group-sub', text: '「メインへ移す」で ' + group.main.name + ' に追加。「却下」した曲は今後おすすめしません' }),
-          button,
+          el('div', { class: 'actions' }, group.tracks.length ? [playAll, button] : [button]),
         ]),
         panel,
       );
@@ -340,11 +346,12 @@ export const reviewPage = `<!doctype html>
     return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
   }
 
-  async function playTrack(uri) {
+  // おすすめ用プレイリストを、指定の曲 (省略時は先頭) から最後まで順に流す
+  async function playTrack(group, uri) {
     if (!player || !deviceId) throw new Error('プレーヤーの準備ができていません');
     // Safari などで自動再生扱いにされないよう、クリック中に再生要素を有効化しておく
     player.activateElement();
-    await api('POST', '/api/play', { uri, device: deviceId });
+    await api('POST', '/api/play', { playlist: group.inbox.id, uri, device: deviceId });
   }
 
   function renderState(state) {
@@ -367,6 +374,8 @@ export const reviewPage = `<!doctype html>
   }
 
   toggle.addEventListener('click', () => player && player.togglePlay());
+  document.getElementById('prev').addEventListener('click', () => player && player.previousTrack());
+  document.getElementById('next').addEventListener('click', () => player && player.nextTrack());
   seek.addEventListener('input', () => {
     seeking = true;
     time.textContent = fmt(Number(seek.value)) + ' / ' + fmt(Number(seek.max));

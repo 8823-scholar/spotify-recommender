@@ -173,8 +173,13 @@ export async function searchTracks(query: string, limit: number): Promise<Track[
   return res.tracks.items.filter((t): t is RawTrack => !!t).map(toTrack);
 }
 
-export async function playOnDevice(deviceId: string, uri: string): Promise<void> {
-  await api('PUT', `/me/player/play?device_id=${encodeURIComponent(deviceId)}`, { uris: [uri] });
+// プレイリストを文脈として再生し、指定の曲 (省略時は先頭) から最後まで順に流す。
+// 文脈再生なので、再生中にプレイリストから消した曲は飛ばされる
+export async function playPlaylist(deviceId: string, playlistId: string, uri?: string): Promise<void> {
+  await api('PUT', `/me/player/play?device_id=${encodeURIComponent(deviceId)}`, {
+    context_uri: `spotify:playlist:${playlistId}`,
+    offset: uri ? { uri } : { position: 0 },
+  });
 }
 
 export async function createPlaylist(name: string, description: string): Promise<Playlist> {

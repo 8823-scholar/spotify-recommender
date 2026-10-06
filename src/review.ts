@@ -6,7 +6,7 @@ import { listInboxes, moveToMain, rejectRecommendations } from './actions.js';
 import { PLAYBACK_SCOPES } from './config.js';
 import { jobStatus, startRegenerate } from './regenerate.js';
 import { reviewPage } from './review-page.js';
-import { getPlaylist, playOnDevice } from './spotify.js';
+import { getPlaylist, playPlaylist } from './spotify.js';
 import { accessToken, missingScopes } from './token.js';
 
 const TRACK_URI = /^spotify:track:[A-Za-z0-9]+$/;
@@ -117,11 +117,17 @@ export function startReviewServer(port: number): Promise<ReviewServer> {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/api/play') {
-        const { uri, device } = (await readJson(req)) as Record<string, unknown>;
-        if (typeof uri !== 'string' || !TRACK_URI.test(uri) || typeof device !== 'string' || !DEVICE_ID.test(device)) {
-          throw new Error('uri と device の形式が不正です');
+        const { playlist, uri, device } = (await readJson(req)) as Record<string, unknown>;
+        if (
+          typeof playlist !== 'string' ||
+          !PLAYLIST_ID.test(playlist) ||
+          (uri !== undefined && (typeof uri !== 'string' || !TRACK_URI.test(uri))) ||
+          typeof device !== 'string' ||
+          !DEVICE_ID.test(device)
+        ) {
+          throw new Error('playlist・uri・device の形式が不正です');
         }
-        await playOnDevice(device, uri);
+        await playPlaylist(device, playlist, uri);
         send(res, 200, {});
         return;
       }
