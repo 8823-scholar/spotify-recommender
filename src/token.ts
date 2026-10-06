@@ -10,12 +10,14 @@ export type StoredToken = {
   access_token: string;
   refresh_token: string;
   expires_at: number;
+  scope?: string;
 };
 
 type TokenResponse = {
   access_token: string;
   refresh_token?: string;
   expires_in: number;
+  scope?: string;
 };
 
 export async function requestToken(params: Record<string, string>): Promise<TokenResponse> {
@@ -30,8 +32,8 @@ export async function requestToken(params: Record<string, string>): Promise<Toke
   return (await res.json()) as TokenResponse;
 }
 
-export async function saveToken(res: TokenResponse, previousRefreshToken?: string): Promise<StoredToken> {
-  const refreshToken = res.refresh_token ?? previousRefreshToken;
+export async function saveToken(res: TokenResponse, previous?: StoredToken): Promise<StoredToken> {
+  const refreshToken = res.refresh_token ?? previous?.refresh_token;
   if (!refreshToken) {
     throw new Error('refresh_token が返されませんでした');
   }
@@ -39,6 +41,7 @@ export async function saveToken(res: TokenResponse, previousRefreshToken?: strin
     access_token: res.access_token,
     refresh_token: refreshToken,
     expires_at: Date.now() + res.expires_in * 1000,
+    scope: res.scope ?? previous?.scope,
   };
   const path = tokenPath();
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -60,7 +63,13 @@ export async function refreshToken(): Promise<StoredToken> {
     grant_type: 'refresh_token',
     refresh_token: current.refresh_token,
   });
-  return saveToken(res, current.refresh_token);
+  return saveToken(res, current);
+}
+
+// 古いトークンには scope が保存されていないので、その場合は全て不足として扱う
+export async function missingScopes(required: string[]): Promise<string[]> {
+  const granted = new Set((await loadToken()).scope?.split(' ') ?? []);
+  return required.filter((s) => !granted.has(s));
 }
 
 export async function accessToken(): Promise<string> {

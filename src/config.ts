@@ -1,11 +1,15 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+// 整理画面で全曲を再生するための権限 (Web Playback SDK と再生開始 API)
+export const PLAYBACK_SCOPES = ['streaming', 'user-read-email', 'user-read-private', 'user-modify-playback-state'];
+
 export const SCOPES = [
   'playlist-read-private',
   'playlist-read-collaborative',
   'playlist-modify-private',
   'playlist-modify-public',
+  ...PLAYBACK_SCOPES,
 ];
 
 // Spotify は redirect URI に localhost を受け付けないため loopback IP を使う

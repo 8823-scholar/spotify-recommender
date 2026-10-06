@@ -63,6 +63,20 @@ export const reviewPage = `<!doctype html>
   .panel ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
   .panel .result { white-space: pre-wrap; margin-top: 8px; }
   .panel .head { font-weight: 600; }
+  .play { display: none; }
+  body.sdk .play { display: inline-block; }
+  body.sdk .card iframe { display: none; }
+  .card.playing { border-color: var(--accent); }
+  #notice { font-size: 13px; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin-bottom: 16px; }
+  #player { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line); padding: 10px 16px; display: none; }
+  #player.show { display: block; }
+  #player .inner { max-width: 720px; margin: 0 auto; display: flex; align-items: center; gap: 12px; }
+  #player .now { flex: 1; min-width: 0; }
+  #player .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #player input { width: 100%; accent-color: var(--accent); margin: 4px 0 0; }
+  #player .time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  body.has-player main { padding-bottom: 140px; }
+  body.has-player #toast { bottom: 96px; }
   #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 16px; border-radius: 999px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: calc(100% - 32px); }
   #toast.show { opacity: .92; }
 </style>
@@ -73,8 +87,19 @@ export const reviewPage = `<!doctype html>
     <h1>おすすめの整理</h1>
     <button class="reload" id="reload">再読み込み</button>
   </header>
+  <div id="notice" hidden></div>
   <div id="root"><p class="status">読み込み中…</p></div>
 </main>
+<div id="player">
+  <div class="inner">
+    <button id="toggle">一時停止</button>
+    <div class="now">
+      <div class="title" id="now-title"></div>
+      <input type="range" id="seek" min="0" max="0" value="0" aria-label="再生位置">
+    </div>
+    <span class="time" id="time"></span>
+  </div>
+</div>
 <div id="toast" role="status"></div>
 <script>
   const token = new URLSearchParams(location.search).get('t');
@@ -118,10 +143,11 @@ export const reviewPage = `<!doctype html>
   function trackCard(group, track, section) {
     const id = track.uri.split(':').pop();
     const album = track.year ? track.album + ' (' + track.year + ')' : track.album;
+    const play = el('button', { class: 'play', text: '▶ 再生' });
     const move = el('button', { class: 'move', text: 'メインへ移す' });
     const reject = el('button', { class: 'reject', text: '却下' });
     const error = el('div', { class: 'error', hidden: '' });
-    const card = el('div', { class: 'card' }, [
+    const card = el('div', { class: 'card', 'data-uri': track.uri }, [
       el('iframe', {
         src: 'https://open.spotify.com/embed/track/' + id + '?utm_source=generator',
         loading: 'lazy',
@@ -133,10 +159,20 @@ export const reviewPage = `<!doctype html>
           el('div', { class: 'title', text: track.name + ' — ' + track.artists.join(', ') }),
           el('div', { class: 'sub', text: album }),
         ]),
-        el('div', { class: 'actions' }, [move, reject]),
+        el('div', { class: 'actions' }, [play, move, reject]),
       ]),
       error,
     ]);
+
+    play.addEventListener('click', async () => {
+      error.hidden = true;
+      try {
+        await playTrack(track.uri);
+      } catch (e) {
+        error.textContent = '再生できませんでした: ' + e.message;
+        error.hidden = false;
+      }
+    });
 
     async function act(kind) {
       move.disabled = reject.disabled = true;
@@ -277,8 +313,113 @@ export const reviewPage = `<!doctype html>
     }
   }
 
+  // 埋め込みプレーヤーは別サイト扱いでログイン状態が届かずプレビューになるため、
+  // Web Playback SDK でこのページ自体を再生端末にして全曲を流す。使えなければ埋め込みのまま
+  const notice = document.getElementById('notice');
+  const bar = document.getElementById('player');
+  const nowTitle = document.getElementById('now-title');
+  const seek = document.getElementById('seek');
+  const time = document.getElementById('time');
+  const toggle = document.getElementById('toggle');
+  let player;
+  let deviceId;
+  let seeking = false;
+
+  function showNotice(message) {
+    notice.textContent = message;
+    notice.hidden = false;
+  }
+
+  function fallbackToEmbed(message) {
+    document.body.classList.remove('sdk');
+    showNotice(message + ' 埋め込みプレーヤー (プレビュー再生) を表示しています。');
+  }
+
+  function fmt(ms) {
+    const s = Math.floor(ms / 1000);
+    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  }
+
+  async function playTrack(uri) {
+    if (!player || !deviceId) throw new Error('プレーヤーの準備ができていません');
+    // Safari などで自動再生扱いにされないよう、クリック中に再生要素を有効化しておく
+    player.activateElement();
+    await api('POST', '/api/play', { uri, device: deviceId });
+  }
+
+  function renderState(state) {
+    if (!state || !state.track_window.current_track) {
+      bar.classList.remove('show');
+      document.body.classList.remove('has-player');
+      return;
+    }
+    const t = state.track_window.current_track;
+    bar.classList.add('show');
+    document.body.classList.add('has-player');
+    nowTitle.textContent = t.name + ' — ' + t.artists.map((a) => a.name).join(', ');
+    toggle.textContent = state.paused ? '▶ 再生' : '一時停止';
+    seek.max = String(state.duration);
+    if (!seeking) seek.value = String(state.position);
+    time.textContent = fmt(state.position) + ' / ' + fmt(state.duration);
+    for (const card of document.querySelectorAll('.card')) {
+      card.classList.toggle('playing', card.dataset.uri === t.uri);
+    }
+  }
+
+  toggle.addEventListener('click', () => player && player.togglePlay());
+  seek.addEventListener('input', () => {
+    seeking = true;
+    time.textContent = fmt(Number(seek.value)) + ' / ' + fmt(Number(seek.max));
+  });
+  seek.addEventListener('change', async () => {
+    if (player) await player.seek(Number(seek.value));
+    seeking = false;
+  });
+  setInterval(async () => {
+    if (player && bar.classList.contains('show')) renderState(await player.getCurrentState());
+  }, 1000);
+
+  async function initPlayer() {
+    try {
+      await api('GET', '/api/player-token');
+    } catch (e) {
+      fallbackToEmbed(e.message + '。');
+      return;
+    }
+    window.onSpotifyWebPlaybackSDKReady = () => {
+      player = new Spotify.Player({
+        name: 'おすすめの整理',
+        getOAuthToken: (cb) => api('GET', '/api/player-token').then((r) => cb(r.token)),
+        volume: 0.8,
+      });
+      player.addListener('ready', ({ device_id }) => {
+        deviceId = device_id;
+        document.body.classList.add('sdk');
+        notice.hidden = true;
+      });
+      player.addListener('not_ready', () => {
+        deviceId = undefined;
+      });
+      player.addListener('initialization_error', ({ message }) =>
+        fallbackToEmbed('このブラウザでは全曲再生を使えません (' + message + ')。'));
+      player.addListener('authentication_error', ({ message }) =>
+        fallbackToEmbed('Spotify の認証に失敗しました (' + message + ')。npm run auth をやり直してください。'));
+      player.addListener('account_error', () =>
+        fallbackToEmbed('全曲再生には Spotify Premium が必要です。'));
+      player.addListener('playback_error', ({ message }) => showToast('再生エラー: ' + message));
+      player.addListener('autoplay_failed', () => showToast('ブラウザに自動再生を止められました。もう一度「再生」を押してください'));
+      player.addListener('player_state_changed', renderState);
+      player.connect();
+    };
+    const script = document.createElement('script');
+    script.src = 'https://sdk.scdn.co/spotify-player.js';
+    script.onerror = () => fallbackToEmbed('Spotify の再生 SDK を読み込めませんでした。');
+    document.head.append(script);
+  }
+
   document.getElementById('reload').addEventListener('click', load);
   load();
+  initPlayer();
 </script>
 </body>
 </html>

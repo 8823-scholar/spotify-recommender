@@ -173,6 +173,10 @@ export async function searchTracks(query: string, limit: number): Promise<Track[
   return res.tracks.items.filter((t): t is RawTrack => !!t).map(toTrack);
 }
 
+export async function playOnDevice(deviceId: string, uri: string): Promise<void> {
+  await api('PUT', `/me/player/play?device_id=${encodeURIComponent(deviceId)}`, { uris: [uri] });
+}
+
 export async function createPlaylist(name: string, description: string): Promise<Playlist> {
   return toPlaylist(await api<RawPlaylist>('POST', '/me/playlists', { name, description, public: false }));
 }

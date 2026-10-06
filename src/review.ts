@@ -3,18 +3,27 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { listInboxes, moveToMain, rejectRecommendations } from './actions.js';
+import { PLAYBACK_SCOPES } from './config.js';
 import { jobStatus, startRegenerate } from './regenerate.js';
 import { reviewPage } from './review-page.js';
-import { getPlaylist } from './spotify.js';
+import { getPlaylist, playOnDevice } from './spotify.js';
+import { accessToken, missingScopes } from './token.js';
 
 const TRACK_URI = /^spotify:track:[A-Za-z0-9]+$/;
 const PLAYLIST_ID = /^[A-Za-z0-9]+$/;
+const DEVICE_ID = /^[A-Za-z0-9_-]+$/;
 const MAX_BODY = 10_000;
 
 export type ReviewServer = { url: string; close: () => Promise<void> };
 
-const PAGE_CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src https://open.spotify.com";
+// Web Playback SDK は sdk.scdn.co のスクリプトと iframe を読み込み、Spotify のサーバーと通信する
+const PAGE_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline' https://sdk.scdn.co",
+  "style-src 'unsafe-inline'",
+  "connect-src 'self' https://*.spotify.com wss://*.spotify.com https://*.scdn.co",
+  'frame-src https://open.spotify.com https://sdk.scdn.co',
+].join('; ');
 
 function send(res: ServerResponse, status: number, body: unknown, type = 'application/json; charset=utf-8') {
   res.writeHead(status, {
@@ -93,6 +102,27 @@ export function startReviewServer(port: number): Promise<ReviewServer> {
       if (req.method === 'POST' && url.pathname === '/api/reject') {
         const { main, uri } = parseAction(await readJson(req));
         send(res, 200, await rejectRecommendations(main, [uri]));
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/player-token') {
+        const missing = await missingScopes(PLAYBACK_SCOPES);
+        if (missing.length > 0) {
+          send(res, 409, {
+            error: '全曲再生には再認証が必要です。ターミナルで npm run auth を実行してから再読み込みしてください',
+            missing,
+          });
+          return;
+        }
+        send(res, 200, { token: await accessToken() });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/play') {
+        const { uri, device } = (await readJson(req)) as Record<string, unknown>;
+        if (typeof uri !== 'string' || !TRACK_URI.test(uri) || typeof device !== 'string' || !DEVICE_ID.test(device)) {
+          throw new Error('uri と device の形式が不正です');
+        }
+        await playOnDevice(device, uri);
+        send(res, 200, {});
         return;
       }
       if (req.method === 'GET' && url.pathname === '/api/regenerate') {
