@@ -3,7 +3,9 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { listInboxes, moveToMain, rejectRecommendations } from './actions.js';
+import { jobStatus, startRegenerate } from './regenerate.js';
 import { reviewPage } from './review-page.js';
+import { getPlaylist } from './spotify.js';
 
 const TRACK_URI = /^spotify:track:[A-Za-z0-9]+$/;
 const PLAYLIST_ID = /^[A-Za-z0-9]+$/;
@@ -39,6 +41,11 @@ function parseAction(body: unknown): { main: string; uri: string } {
     throw new Error('main と uri の形式が不正です');
   }
   return { main, uri };
+}
+
+function parseMain(value: unknown): string {
+  if (typeof value !== 'string' || !PLAYLIST_ID.test(value)) throw new Error('main の形式が不正です');
+  return value;
 }
 
 export function startReviewServer(port: number): Promise<ReviewServer> {
@@ -86,6 +93,15 @@ export function startReviewServer(port: number): Promise<ReviewServer> {
       if (req.method === 'POST' && url.pathname === '/api/reject') {
         const { main, uri } = parseAction(await readJson(req));
         send(res, 200, await rejectRecommendations(main, [uri]));
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/regenerate') {
+        send(res, 200, jobStatus(parseMain(url.searchParams.get('main'))));
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/regenerate') {
+        const main = await getPlaylist(parseMain(((await readJson(req)) as { main?: unknown })?.main));
+        send(res, 200, startRegenerate({ id: main.id, name: main.name }));
         return;
       }
       send(res, 404, { error: 'not found' });

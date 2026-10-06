@@ -60,6 +60,17 @@ export async function rejectRecommendations(
   return { rejected: targets, missing };
 }
 
+export async function inboxUris(mainId: string): Promise<string[]> {
+  const inbox = await lookupInbox(mainId);
+  return inbox ? (await playlistTracks(inbox.id)).map((t) => t.uri) : [];
+}
+
+// 却下としては記録せず、おすすめ用から消すだけ
+export async function clearRecommendations(mainId: string, uris: string[]): Promise<void> {
+  const inbox = await lookupInbox(mainId);
+  if (inbox && uris.length > 0) await removeItems(inbox.id, uris);
+}
+
 export type InboxView = { main: Pick<Playlist, 'id' | 'name'>; inbox: Pick<Playlist, 'id' | 'name'>; tracks: Track[] };
 
 export async function listInboxes(): Promise<InboxView[]> {
